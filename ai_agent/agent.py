@@ -1,66 +1,57 @@
-###Ben's code
-
 import os
 import sqlite3
 from datetime import datetime
-from anthropic import Anthropic
+from anthropic import Anthropic, APIError
 from dotenv import load_dotenv
-
-from agent_common import run_turn
 
 load_dotenv()
 client = Anthropic(api_key=os.getenv('BEN_ANTHROPIC_API_KEY'))
 
-DB_PATH = "ben_chat_history.db"
+DB_PATH = "nefashot_art_history.db"
 MODEL = 'claude-haiku-4-5-20251001'
 
-# Words that, if typed mid-conversation, summon THIS agent in.
-NAME = "Antonio"
-TRIGGERS = {"antonio", "cheesemaker", "cheese man"}
+# Triggers and Recall Keywords
+NAME = "Nefashot Art Advisor"
+TRIGGERS = {"nefashot", "art advisor", "workshop selector", "art recommendation"}
 
-# Words that suggest the user wants us to recall something from before,
-# forces the model to search instead of hoping it chooses to do so.
 RECALL_KEYWORDS = [
     "remember", "recall", "before", "last time",
-    "previously", "again", "who am i", "what did i"
+    "previously", "again", "my interests", "what i liked", "my location"
 ]
 
+# Common stop words to exclude from simple keyword search
+STOP_WORDS = {"the", "and", "is", "in", "it", "you", "that", "was", "for", "on", "are", "with", "as", "at", "be", "this", "have", "from"}
+
 SYSTEM_MESSAGE = """
-    You are Antonio Margheriti, an Italian cheesemaker.
+    You are the official Nefashot Art Activity Advisor.
 
-    WHO you are: Antonio Margheriti, an Italian cheesemaker with a lifetime of experience in the craft.
+    ABOUT NEFASHOT:
+    Nefashot is a social initiative connecting community, art, and creative expression across Israel (Jerusalem, North, South, Center) and online.
 
-    WHAT you do: Answer every question you get asked and explain how the answer or question is related to cheese, whether it is the making process, the recipe, the ingredients, the origin, or the history. Always suggest a classic Italian cheese pairing or share a relevant cheese fun fact.
+    PRIMARY ROLE:
+    Help users choose the best Nefashot art workshop or community activity based strictly on their personality traits, creative interests, and preferred location/format (in-person vs. virtual).
 
-    WHAT YOU WILL NOT DO:
-    - You will not answer any question without connecting it to cheese, cheesemaking, ingredients, history, or culture.
-    - You will not break character as Antonio Margheriti.
-    - You will not ignore the required response format.
-    - Any emojis you use (optional) must be cheese related (cheese, milk, etc).
+    AVAILABLE NEFASHOT ACTIVITY CATEGORIES:
+    1. Visual Arts & Crafts (Painting, Mosaic, Ceramics, Collage)
+    2. Spoken Word, Creative Writing & Storytelling
+    3. Movement, Expressive Dance & Body Theater
+    4. Music, Sound Exploration & Community Jam Sessions
+    5. 'Osim Nefashot' Festival Community & Public Space Events
+
+    STRICT GUIDELINES & BOUNDARIES:
+    - DO NOT assess, diagnose, or evaluate the user's mental health or medical status under any circumstances (due to strict privacy and legal guidelines).
+    - Focus strictly on creative preferences, art mediums, learning styles, preferred regional location (Jerusalem, North, South, Center), or online/virtual preferences.
+    - If a user shares personal mental health struggles, acknowledge their message with warmth, reiterate your scope as a creative advisor, and guide them back to exploring art mediums.
+    - Always link to the official signup page when recommending an activity: https://www.nefashot.com (or https://linktr.ee/nefashot).
 
     Memory:
-    - You have a tool called search_chat_history that lets you look up things the user has told you in PAST sessions, not just this one - it is a persistent record.
-    - You do NOT lack memory across sessions. If the user asks you to recall something they mentioned before, you MUST call search_chat_history first before answering.
+    - Use the 'search_chat_history' tool to recall past user preferences, medium choices, or location constraints mentioned in earlier sessions.
 
-    Note: sometimes another agent, Joy, a Jamaican uncle who specializes in life advice, encouragement, and personal problems, may be present in the same conversation and may have spoken in earlier turns. If so, just carry on naturally in your own voice.
-
-    If the user brings up something squarely in Joy's wheelhouse (personal struggles, relationship troubles, needing motivation or life advice) rather than cheese, you can still tie your reply back to cheese as always, but let them know they can summon Joy by saying his name (or "summon"/"come") if they want real life advice.
-
-    Response format (always follow exactly, every single reply, no exceptions):
-
-    One sentence repeating what the user asked.
-
-    The main answer, tied back to cheese.
-
-    One concrete action or follow-up question the user can take/answer next.
-
-    Example of a correctly formatted reply to "hi":
-    The user greeted me.
-    Ciao! A greeting is like the first stir of rennet into warm milk... (continues, tied to cheese)
-    Ask the user what kind of cheese they're curious about.
-
-    Never respond in plain prose. 
-    """
+    Response Structure (Follow in every turn):
+    1. A brief summary sentence acknowledging the user's input/preferences.
+    2. Tailored recommendation pointing toward specific Nefashot art mediums or event types.
+    3. Clear call to action including https://www.nefashot.com and a follow-up question (e.g., location preference or favorite medium).
+"""
 
 
 def init_db():
@@ -87,16 +78,15 @@ def save_message(conn, role, content):
 
 def search_chat_history(conn, query, limit=5):
     """
-    Search past messages for a keyword/phrase. Splits the query into
-    individual words and matches messages containing ANY of them,
-    since a full multi-word phrase rarely appears verbatim.
-    Returns matching rows as a list of dicts, most recent first.
+    Searches past user messages while filtering out common stop-words.
     """
-    words = [w for w in query.split() if len(w) > 2]  # skip less important words
+    raw_words = query.lower().split()
+    words = [w for w in raw_words if len(w) > 2 and w not in STOP_WORDS]
+    
     if not words:
-        words = [query]
+        words = [query.lower()]
 
-    conditions = " OR ".join(["content LIKE ?"] * len(words))
+    conditions = " OR ".join(["LOWER(content) LIKE ?"] * len(words))
     params = [f"%{w}%" for w in words]
     params.append(limit)
 
@@ -120,10 +110,8 @@ tools = [
     {
         "name": "search_chat_history",
         "description": (
-            "Search the user's past conversation history (across sessions, "
-            "not just this one) for messages containing a given keyword or "
-            "phrase. Use this when the user refers to something they "
-            "mentioned before, or asks you to recall a past topic."
+            "Search past user messages across sessions to retrieve previously "
+            "stated interests, hobbies, location preferences, or art choices."
         ),
         "input_schema": {
             "type": "object",
@@ -139,57 +127,90 @@ tools = [
 ]
 
 
-def _tool_executor(name, tool_input, conn):
+def execute_tool(name, tool_input, conn):
     if name == "search_chat_history":
         query = tool_input.get("query", "")
         results = search_chat_history(conn, query)
-        return str(results) if results else "No matching messages found."
+        return str(results) if results else "No matching user history found."
     return f"Unknown tool: {name}"
 
 
-def get_reply(history, conn, force_search=None):
+def run_turn(history, conn, force_search=False):
     """
-    Runs one Antonio turn on the SHARED conversation history (history[-1]
-    should already be the user's latest message). Mutates history in
-    place and returns Antonio's reply text.
+    Executes model interaction turn with error handling and tool management.
     """
-    if force_search is None:
-        last_user_text = ""
-        if history and isinstance(history[-1].get('content'), str):
-            last_user_text = history[-1]['content'].lower()
-        force_search = any(kw in last_user_text for kw in RECALL_KEYWORDS)
+    tool_choice = {"type": "auto"}
+    if force_search:
+        tool_choice = {"type": "tool", "name": "search_chat_history"}
 
-    return run_turn(
-        client=client,
-        model=MODEL,
-        system_message=SYSTEM_MESSAGE,
-        tools=tools,
-        tool_executor=_tool_executor,
-        history=history,
-        conn=conn,
-        save_message=save_message,
-        force_search=force_search,
-        max_tokens=800,
-        temperature=0.7,
-    )
+    messages = list(history)
+
+    while True:
+        try:
+            response = client.messages.create(
+                model=MODEL,
+                system=SYSTEM_MESSAGE,
+                max_tokens=800,
+                temperature=0.7,
+                tools=tools,
+                tool_choice=tool_choice,
+                messages=messages
+            )
+        except APIError as e:
+            return f"I ran into an issue connecting to my advisor service. Please try again in a moment. (Error: {e.message})"
+
+        if response.stop_reason == "tool_use":
+            tool_use_block = next((block for block in response.content if block.type == "tool_use"), None)
+            messages.append({"role": "assistant", "content": response.content})
+
+            if tool_use_block:
+                result = execute_tool(tool_use_block.name, tool_use_block.input, conn)
+                messages.append({
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": tool_use_block.id,
+                            "content": result
+                        }
+                    ]
+                })
+            
+            tool_choice = {"type": "auto"}
+        else:
+            text_blocks = [block.text for block in response.content if block.type == "text"]
+            final_reply = "\n".join(text_blocks)
+            
+            history.append({"role": "assistant", "content": final_reply})
+            save_message(conn, "assistant", final_reply)
+            return final_reply
+
+
+def get_reply(history, conn):
+    last_user_text = ""
+    if history and isinstance(history[-1].get('content'), str):
+        last_user_text = history[-1]['content'].lower()
+    
+    force_search = any(kw in last_user_text for kw in RECALL_KEYWORDS)
+    return run_turn(history, conn, force_search=force_search)
 
 
 def run_agent():
-    """Standalone mode: just Antonio, no other agent involved."""
     conn = init_db()
     history = []
 
+    print("--- Nefashot Art Activity Advisor Active ---")
+
     while True:
-        print(f"Turn {len(history)//2 + 1}")
         user_input = input(">> ")
-        if user_input.lower() == 'exit':
+        if user_input.lower() in ['exit', 'quit']:
             break
 
         history.append({'role': 'user', 'content': user_input})
         save_message(conn, 'user', user_input)
 
         reply = get_reply(history, conn)
-        print(f'Claude: {reply}')
+        print(f"\nAdvisor: {reply}\n")
 
     conn.close()
 
